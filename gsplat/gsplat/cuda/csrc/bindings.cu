@@ -609,6 +609,230 @@ std::tuple<
     return std::make_tuple(out_img, final_Ts, final_idx);
 }
 
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor
+> rasterize_forward_sum_gabor_tensor(
+    const std::tuple<int, int, int> tile_bounds,
+    const std::tuple<int, int, int> block,
+    const std::tuple<int, int, int> img_size,
+    const torch::Tensor &gaussian_ids_sorted,
+    const torch::Tensor &tile_bins,
+    const torch::Tensor &xys,
+    const torch::Tensor &conics,
+    const torch::Tensor &colors,
+    const torch::Tensor &opacities,
+    const torch::Tensor &background,
+    const torch::Tensor &gabor_weights,
+    const torch::Tensor &gabor_freqs_x,
+    const torch::Tensor &gabor_freqs_y,
+    const int F
+) {
+    CHECK_INPUT(gaussian_ids_sorted);
+    CHECK_INPUT(tile_bins);
+    CHECK_INPUT(xys);
+    CHECK_INPUT(conics);
+    CHECK_INPUT(colors);
+    CHECK_INPUT(opacities);
+    CHECK_INPUT(background);
+    CHECK_INPUT(gabor_weights);
+    CHECK_INPUT(gabor_freqs_x);
+    CHECK_INPUT(gabor_freqs_y);
+
+    dim3 tile_bounds_dim3;
+    tile_bounds_dim3.x = std::get<0>(tile_bounds);
+    tile_bounds_dim3.y = std::get<1>(tile_bounds);
+    tile_bounds_dim3.z = std::get<2>(tile_bounds);
+
+    dim3 block_dim3;
+    block_dim3.x = std::get<0>(block);
+    block_dim3.y = std::get<1>(block);
+    block_dim3.z = std::get<2>(block);
+
+    dim3 img_size_dim3;
+    img_size_dim3.x = std::get<0>(img_size);
+    img_size_dim3.y = std::get<1>(img_size);
+    img_size_dim3.z = std::get<2>(img_size);
+
+    const int channels = colors.size(1);
+    const int img_width = img_size_dim3.x;
+    const int img_height = img_size_dim3.y;
+
+    auto int_opts = xys.options().dtype(torch::kInt32);
+    auto float_opts = xys.options().dtype(torch::kFloat32);
+    torch::Tensor out_img = torch::zeros(
+        {img_height, img_width, channels}, float_opts
+    );
+    torch::Tensor final_Ts = torch::zeros(
+        {img_height, img_width}, float_opts
+    );
+    torch::Tensor final_idx = torch::zeros(
+        {img_height, img_width}, int_opts
+    );
+
+    rasterize_forward_sum_gabor<<<tile_bounds_dim3, block_dim3>>>(
+        tile_bounds_dim3,
+        img_size_dim3,
+        gaussian_ids_sorted.contiguous().data_ptr<int32_t>(),
+        (int2 *)tile_bins.contiguous().data_ptr<int>(),
+        (float2 *)xys.contiguous().data_ptr<float>(),
+        (float3 *)conics.contiguous().data_ptr<float>(),
+        (float3 *)colors.contiguous().data_ptr<float>(),
+        opacities.contiguous().data_ptr<float>(),
+        gabor_freqs_x.contiguous().data_ptr<float>(),
+        gabor_freqs_y.contiguous().data_ptr<float>(),
+        gabor_weights.contiguous().data_ptr<float>(),
+        F,
+        final_Ts.contiguous().data_ptr<float>(),
+        final_idx.contiguous().data_ptr<int>(),
+        (float3 *)out_img.contiguous().data_ptr<float>(),
+        *(float3 *)background.contiguous().data_ptr<float>()
+    );
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        AT_ERROR("CUDA kernel launch error in rasterize_forward_sum_gabor: ",
+                 cudaGetErrorString(err));
+    }
+
+    return std::make_tuple(out_img, final_Ts, final_idx);
+}
+
+std::tuple<
+    torch::Tensor, // dL_dxy
+    torch::Tensor, // dL_dconic
+    torch::Tensor, // dL_dcolors
+    torch::Tensor, // dL_dopacity
+    torch::Tensor, // dL_dweights
+    torch::Tensor, // dL_dfreqs_x
+    torch::Tensor  // dL_dfreqs_y
+>
+rasterize_backward_sum_gabor_tensor(
+    const unsigned img_height,
+    const unsigned img_width,
+    const unsigned BLOCK_H,
+    const unsigned BLOCK_W,
+    const torch::Tensor &gaussians_ids_sorted,
+    const torch::Tensor &tile_bins,
+    const torch::Tensor &xys,
+    const torch::Tensor &conics,
+    const torch::Tensor &colors,
+    const torch::Tensor &opacities,
+    const torch::Tensor &background,
+    const torch::Tensor &gabor_weights,
+    const torch::Tensor &gabor_freqs_x,
+    const torch::Tensor &gabor_freqs_y,
+    const int F,  // number of frequencies per gaussian
+
+    const torch::Tensor &final_Ts,
+    const torch::Tensor &final_idx,
+    const torch::Tensor &v_output,      // dL_dout_color
+    const torch::Tensor &v_output_alpha // dL_dout_alpha
+) {
+    // ===== 输入验证 =====
+    CHECK_INPUT(xys);
+    CHECK_INPUT(conics);
+    CHECK_INPUT(colors);
+    CHECK_INPUT(opacities);
+    CHECK_INPUT(gabor_weights);
+    CHECK_INPUT(gabor_freqs_x);
+    CHECK_INPUT(gabor_freqs_y);
+    CHECK_INPUT(final_Ts);
+    CHECK_INPUT(final_idx);
+    CHECK_INPUT(v_output);
+    CHECK_INPUT(v_output_alpha);
+
+    // 验证维度
+    TORCH_CHECK(xys.ndimension() == 2 && xys.size(1) == 2, 
+                "xys must have dimensions (num_points, 2)");
+    TORCH_CHECK(colors.ndimension() == 2 && colors.size(1) == 3, 
+                "colors must have dimensions (num_points, 3)");
+    TORCH_CHECK(gabor_weights.ndimension() == 1, 
+                "gabor_weights must be 1D tensor (num_points * F)");
+    TORCH_CHECK(gabor_freqs_x.ndimension() == 1 && 
+                gabor_freqs_y.ndimension() == 1,
+                "gabor_freqs must be 1D tensors");
+    TORCH_CHECK(background.ndimension() == 1 && background.size(0) == 3,
+                "background must be 3D vector");
+
+    const int num_points = xys.size(0);
+    const int num_gabor_params = num_points * F;
+    
+    // 验证 Gabor 参数尺寸
+    TORCH_CHECK(gabor_weights.size(0) == num_gabor_params,
+                "gabor_weights size mismatch: expected ", num_gabor_params);
+    TORCH_CHECK(gabor_freqs_x.size(0) == num_gabor_params &&
+                gabor_freqs_y.size(0) == num_gabor_params,
+                "gabor_freqs size mismatch");
+
+    // ===== 计算网格配置 =====
+    const dim3 tile_bounds = {
+        (img_width + BLOCK_W - 1) / BLOCK_W,
+        (img_height + BLOCK_H - 1) / BLOCK_H,
+        1
+    };
+    const dim3 block(BLOCK_W, BLOCK_H, 1);
+    const dim3 img_size = {img_width, img_height, 1};
+    const int channels = colors.size(1); // 应为 3
+
+    // ===== 分配输出梯度张量 =====
+    auto options = xys.options();
+    torch::Tensor v_xy = torch::zeros({num_points, 2}, options);
+    torch::Tensor v_conic = torch::zeros({num_points, 3}, options);
+    torch::Tensor v_colors = torch::zeros({num_points, channels}, options);
+    torch::Tensor v_opacity = torch::zeros({num_points, 1}, options);
+    torch::Tensor v_weights = torch::zeros({num_gabor_params}, options);
+    torch::Tensor v_freqs_x = torch::zeros({num_gabor_params}, options);
+    torch::Tensor v_freqs_y = torch::zeros({num_gabor_params}, options);
+
+    // ===== 启动 Gabor 专用反向 kernel =====
+    // 关键修正：所有 float3/float2/int2 类型必须先获取 float*/int* 指针，再进行 C 风格强转
+    rasterize_backward_sum_gabor_kernel<<<tile_bounds, block>>>(
+        tile_bounds,
+        img_size,
+        gaussians_ids_sorted.contiguous().data_ptr<int32_t>(),
+        (int2*)tile_bins.contiguous().data_ptr<int>(),           // 修正: cast int* to int2*
+        (float2*)xys.contiguous().data_ptr<float>(),             // 修正: cast float* to float2*
+        (float3*)conics.contiguous().data_ptr<float>(),          // 修正: cast float* to float3*
+        (float3*)colors.contiguous().data_ptr<float>(),          // 修正: cast float* to float3*
+        opacities.contiguous().data_ptr<float>(),
+        *(float3*)background.contiguous().data_ptr<float>(),     // 修正: 解引用 float3* 指针
+        gabor_freqs_x.contiguous().data_ptr<float>(),
+        gabor_freqs_y.contiguous().data_ptr<float>(),
+        gabor_weights.contiguous().data_ptr<float>(),
+        final_Ts.contiguous().data_ptr<float>(),
+        final_idx.contiguous().data_ptr<int32_t>(),
+        (float3*)v_output.contiguous().data_ptr<float>(),        // 修正: cast float* to float3*
+        v_output_alpha.contiguous().data_ptr<float>(),
+        F,  // num_freqs per gaussian
+        // 输出梯度
+        (float2*)v_xy.contiguous().data_ptr<float>(),            // 修正: cast float* to float2*
+        (float3*)v_conic.contiguous().data_ptr<float>(),         // 修正: cast float* to float3*
+        (float3*)v_colors.contiguous().data_ptr<float>(),        // 修正: cast float* to float3*
+        v_opacity.contiguous().data_ptr<float>(),
+        v_weights.contiguous().data_ptr<float>(),
+        v_freqs_x.contiguous().data_ptr<float>(),
+        v_freqs_y.contiguous().data_ptr<float>()
+    );
+
+    // 检查 kernel 错误
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        AT_ERROR("CUDA kernel launch error in rasterize_backward_sum_gabor_kernel: ", 
+                 cudaGetErrorString(err));
+    }
+
+    return std::make_tuple(
+        v_xy, 
+        v_conic, 
+        v_colors, 
+        v_opacity,
+        v_weights,
+        v_freqs_x,
+        v_freqs_y
+    );
+}
 
 std::tuple<
     torch::Tensor,

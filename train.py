@@ -44,12 +44,13 @@ class SimpleTrainer2d:
         self.args = args
         self.num_points = num_points
         self.max_num_points = args.max_num_points
+        self.num_gabor = args.num_gabor
         image_path = Path(image_path)
         self.image_name = image_path.stem
         BLOCK_H, BLOCK_W = 16, 16
         self.H, self.W = self.gt_image.shape[2], self.gt_image.shape[3]
         self.iterations = iterations
-        self.save_imgs = args.save_imgs
+        self.save_imgs = True # args.save_imgs
         self.loss_type = args.loss_type
 
         self.add_stage = 0
@@ -67,7 +68,7 @@ class SimpleTrainer2d:
                                                        num_points=self.num_points, H=self.H, W=self.W,
                                                        BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                                        device=self.device, lr=args.lr, quantize=args.quantize,
-                                                       args=args, logwriter=self.logwriter).to(self.device)
+                                                       args=args, logwriter=self.logwriter, num_gabor=self.num_gabor).to(self.device)
             model_dict = self.gaussian_model.state_dict()
             pretrained_dict = {k: v for k, v in checkpoint['gs'].items() if k in model_dict}
             self.gaussian_model.cholesky_bound = checkpoint['slv_bound']
@@ -80,7 +81,7 @@ class SimpleTrainer2d:
                                                            num_points=self.num_points, H=self.H, W=self.W,
                                                            BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                                            device=self.device, lr=args.lr, quantize=args.quantize,
-                                                           args=args, logwriter=self.logwriter).to(self.device)
+                                                           args=args, logwriter=self.logwriter, num_gabor=self.num_gabor).to(self.device)
 
     def add_sample_positions(self, render_image, iter=0):
 
@@ -238,6 +239,8 @@ def parse_args(argv):
     parser.add_argument("--coords_act", type=str, default="tanh", help="tanh")
     parser.add_argument("--save_interval", type=int, default=5, help="save interval")
     parser.add_argument("--clip_coe", type=float, default=3.)
+    # Gabor Parameter
+    parser.add_argument("--num_gabor", type=int, default=2)
     #  quantization parameters =======================================
     parser.add_argument("--quantize", type=bool, default=False, help="Quantize")
     parser.add_argument("--cov_quant", type=str, default="lsq", help="type of covariance quantization")

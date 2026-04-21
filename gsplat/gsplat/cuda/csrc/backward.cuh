@@ -132,6 +132,35 @@ __global__ void rasterize_sum_plus_backward_kernel(
     float* __restrict__ v_opacity
 );
 
+__global__ void rasterize_backward_sum_gabor_kernel(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ rgbs,
+    const float* __restrict__ opacities,
+    const float3& __restrict__ background,
+
+    const float* __restrict__ gabor_freqs_x,
+    const float* __restrict__ gabor_freqs_y,
+    const float* __restrict__ gabor_weights,
+    const float* __restrict__ final_Ts,
+    const int* __restrict__ final_index,
+    const float3* __restrict__ v_output,
+    const float* __restrict__ v_output_alpha,
+    int num_freqs,
+    // output 
+    float2* __restrict__ v_xy,
+    float3* __restrict__ v_conic,
+    float3* __restrict__ v_rgb,
+    float* __restrict__ v_opacity,
+    
+    float* __restrict__ v_weights,
+    float* __restrict__ v_freqs_x,
+    float* __restrict__ v_freqs_y
+);
 
 __global__ void rasterize_backward_sum_general_kernel(
     const dim3 tile_bounds,

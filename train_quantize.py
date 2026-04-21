@@ -37,6 +37,7 @@ class SimpleTrainer2d:
 
         self.num_points = num_points
         self.max_num_points = args.max_num_points
+        self.num_gabor = getattr(args, "num_gabor", 2)
         image_path = Path(image_path)
         self.image_name = image_path.stem
         BLOCK_H, BLOCK_W = 16, 16
@@ -59,7 +60,7 @@ class SimpleTrainer2d:
                                                        num_points=self.num_points, H=self.H, W=self.W,
                                                        BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                                        device=self.device, lr=args.lr, quantize=args.quantize,
-                                                       args=args, logwriter=self.logwriter,
+                                                       args=args, logwriter=self.logwriter, num_gabor=self.num_gabor,
                                                        ).to(self.device)
             model_dict = self.gaussian_model.state_dict()
             pretrained_dict = {k: v for k, v in checkpoint['gs'].items() if k in model_dict}
@@ -72,7 +73,7 @@ class SimpleTrainer2d:
                                                            num_points=self.num_points, H=self.H, W=self.W,
                                                            BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
                                                            device=self.device, lr=args.lr, quantize=args.quantize,
-                                                           args=args, logwriter=self.logwriter,
+                                                           args=args, logwriter=self.logwriter, num_gabor=self.num_gabor,
                                                            ).to(self.device)
 
 
@@ -320,6 +321,7 @@ def parse_args(argv):
     parser.add_argument("--coords_act", type=str, default="tanh", help="activate function of coordinates normalization")
     parser.add_argument("--save_interval", type=int, default=5, help="tanh")
     parser.add_argument("--clip_coe", type=float, default=3., help="Set random seed for reproducibility")
+    parser.add_argument("--num_gabor", type=int, default=2)
     parser.add_argument("--pretrained", type=str, help="Path to a checkpoint")
 
     # =============== quantizzaton params ====================

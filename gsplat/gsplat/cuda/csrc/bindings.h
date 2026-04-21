@@ -157,6 +157,60 @@ std::
     );
 
 std::tuple<
+torch::Tensor,
+torch::Tensor,
+torch::Tensor
+>
+rasterize_forward_sum_gabor_tensor(
+    const std::tuple<int, int, int> tile_bounds,
+    const std::tuple<int, int, int> block,
+    const std::tuple<int, int, int> img_size,
+    const torch::Tensor &gaussian_ids_sorted,
+    const torch::Tensor &tile_bins,
+    const torch::Tensor &xys,
+    const torch::Tensor &conics,
+    const torch::Tensor &colors,
+    const torch::Tensor &opacities,
+    const torch::Tensor &background,
+    const torch::Tensor &gabor_weights,
+    const torch::Tensor &gabor_freqs_x,
+    const torch::Tensor &gabor_freqs_y,
+    const int F
+);
+
+std::tuple<
+    torch::Tensor, // dL_dxy
+    torch::Tensor, // dL_dconic
+    torch::Tensor, // dL_dcolors
+    torch::Tensor, // dL_dopacity
+    torch::Tensor, // dL_dweights
+    torch::Tensor, // dL_dfreqs_x
+    torch::Tensor  // dL_dfreqs_y
+>
+rasterize_backward_sum_gabor_tensor(
+        const unsigned img_height,
+        const unsigned img_width,
+        const unsigned BLOCK_H,
+        const unsigned BLOCK_W,
+        const torch::Tensor &gaussians_ids_sorted,
+        const torch::Tensor &tile_bins,
+        const torch::Tensor &xys,
+        const torch::Tensor &conics,
+        const torch::Tensor &colors,
+        const torch::Tensor &opacities,
+        const torch::Tensor &background,
+        const torch::Tensor &gabor_weights,
+        const torch::Tensor &gabor_freqs_x,
+        const torch::Tensor &gabor_freqs_y,
+        const int F,
+
+        const torch::Tensor &final_Ts,
+        const torch::Tensor &final_idx,
+        const torch::Tensor &v_output,      // dL_dout_color
+        const torch::Tensor &v_output_alpha // dL_dout_alpha
+    );
+    
+std::tuple<
     torch::Tensor,
     torch::Tensor,
     torch::Tensor

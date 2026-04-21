@@ -7,6 +7,7 @@ from .project_gaussians_2d_covariance import project_gaussians_2d_covariance  # 
 from .project_gaussians_2d_scale_rot import project_gaussians_2d_scale_rot
 from .rasterize_sum import rasterize_gaussians_sum
 from .rasterize_sum_plus import rasterize_gaussians_plus
+from .rasterize_sum_gabor import rasterize_gabor_plus
 
 from .utils import (
     map_gaussian_to_intersects,
@@ -196,6 +197,19 @@ class RasterizeGaussiansSum(torch.autograd.Function):
             DeprecationWarning,
         )
         return rasterize_gaussians_sum(*args, **kwargs)
+
+    @staticmethod
+    def backward(ctx: Any, *grad_outputs: Any) -> Any:
+        raise NotImplementedError
+
+class RasterizeGaborSum(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, *args, **kwargs):
+        warnings.warn(
+            "RasterizeGaborSum is deprecated, use rasterize_gaussians instead",
+            DeprecationWarning,
+        )
+        return rasterize_gabor_plus(*args, **kwargs)
 
     @staticmethod
     def backward(ctx: Any, *grad_outputs: Any) -> Any:

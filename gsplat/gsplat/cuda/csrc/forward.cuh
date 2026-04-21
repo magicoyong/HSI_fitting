@@ -170,6 +170,25 @@ __global__ void rasterize_sum_plus_forward( // accumulate sum render
     bool isprint
 );
 
+__global__ void rasterize_forward_sum_gabor(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float3* __restrict__ colors,
+    const float* __restrict__ opacities,
+    const float* __restrict__ gabor_freqs_x,
+    const float* __restrict__ gabor_freqs_y,    
+    const float* __restrict__ gabor_weights,
+    const int num_freqs,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float3* __restrict__ out_img,
+    const float3& __restrict__ background
+);
+
 __global__ void rasterize_forward_sum_general(
     const dim3 tile_bounds,
     const dim3 img_size,

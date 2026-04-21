@@ -1,5 +1,6 @@
 import sys
 from gsplat.project_gaussians_2d_covariance import project_gaussians_2d_covariance
+from gsplat.rasterize_sum_gabor import rasterize_gabor_sum
 from gsplat.rasterize_sum_plus import rasterize_gaussians_plus
 
 from utils import *
@@ -25,7 +26,15 @@ class GaussianImage_Covariance(nn.Module):
             (self.W + self.BLOCK_W - 1) // self.BLOCK_W,
             (self.H + self.BLOCK_H - 1) // self.BLOCK_H,
             1,
-        )  #
+        )
+        # gabor parameter
+        self.num_gabor = kwargs.get("num_gabor", getattr(kwargs["args"], "num_gabor", 2))
+        self.gabor_freqs = nn.Parameter(
+            (torch.rand(self.init_num_points * self.num_gabor, 2) - 0.5) * 0.002
+        )
+        self.gabor_weights = nn.Parameter(
+            torch.rand(self.init_num_points * self.num_gabor, 1) * (-5)
+        )
         self.device = kwargs["device"]
         self.SLV = kwargs["args"].SLV_init
         self.color_norm = kwargs["args"].color_norm
@@ -92,7 +101,9 @@ class GaussianImage_Covariance(nn.Module):
             l = [
                 {'params': [self._xyz], 'lr': kwargs["lr"], "name": "xyz"},
                 {'params': [self._features_dc], 'lr': kwargs["lr"], "name": "f_dc"},
-                {'params': [self._cov2d], 'lr': kwargs["lr"], "name": "cov2d"}
+                {'params': [self._cov2d], 'lr': kwargs["lr"], "name": "cov2d"},
+                {'params': [self.gabor_freqs], 'lr': kwargs["lr"], "name": "gabor_freqs"},
+                {'params': [self.gabor_weights], 'lr': kwargs["lr"], "name": "gabor_weights"},
             ]
 
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -107,7 +118,9 @@ class GaussianImage_Covariance(nn.Module):
             l = [
                 {'params': [self._xyz], 'lr': lr, "name": "xyz"},
                 {'params': [self._features_dc], 'lr': lr, "name": "f_dc"},
-                {'params': [self._cov2d], 'lr': lr, "name": "cov2d"}
+                {'params': [self._cov2d], 'lr': lr, "name": "cov2d"},
+                {'params': [self.gabor_freqs], 'lr': lr, "name": "gabor_freqs"},
+                {'params': [self.gabor_weights], 'lr': lr, "name": "gabor_weights"},
             ]
 
             self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -177,6 +190,23 @@ class GaussianImage_Covariance(nn.Module):
         covs = self.get_cov2d_elements
         std = torch.clamp((torch.cat([covs[:, 0:1], covs[:, 2:3]], dim=1)), 1e5, 300)
         return std
+    
+    @property
+    def get_gabor_freqs(self):
+        return torch.exp(self.gabor_freqs)
+
+    @property
+    def get_gabor_weights(self):
+        return torch.sigmoid(self.gabor_weights)
+
+    def _init_gabor_params(self, num_points):
+        return (
+            (torch.rand(num_points * self.num_gabor, 2, device=self.device) - 0.5) * 0.002,
+            torch.rand(num_points * self.num_gabor, 1, device=self.device) * (-5),
+        )
+
+    def _expand_gabor_mask(self, mask):
+        return mask.repeat_interleave(self.num_gabor)
 
     def get_attributes(self):
         coords = self.xys.detach().clone().cpu().numpy()
@@ -200,8 +230,8 @@ class GaussianImage_Covariance(nn.Module):
                                                                                               isprint=isprint,
                                                                                               )
 
-        out_img = rasterize_gaussians_plus(self.xys, depths, self.radii, conics, num_tiles_hit,
-                                           self.get_features, self.get_opacity, H, W, self.BLOCK_H, self.BLOCK_W,
+        out_img = rasterize_gabor_sum(self.xys, depths, self.radii, conics, num_tiles_hit,
+                                           self.get_features, self.get_opacity, self.get_gabor_freqs[:,0], self.get_gabor_freqs[:,1], self.get_gabor_weights, self.num_gabor, H, W, self.BLOCK_H, self.BLOCK_W,
                                            background=self.background,
                                            isprint=isprint,
                                            radius_clip=self.radius_clip
@@ -307,10 +337,13 @@ class GaussianImage_Covariance(nn.Module):
     def densification_postfix(self, new_xyz, new_features_dc, new_cov2d, new_opacities=None, new_bkcolor=None):
         #  排除本身不正定的点
         none_definite, valid_mask = self.check_non_semi_definite(new_cov2d)
+           new_gabor_freqs, new_gabor_weights = self._init_gabor_params(int(valid_mask.sum().item()))
 
         d = {"xyz": new_xyz[valid_mask],
              "f_dc": new_features_dc[valid_mask],
              "cov2d": new_cov2d[valid_mask],
+               "gabor_freqs": new_gabor_freqs,
+               "gabor_weights": new_gabor_weights,
              }
 
         original_points_nums = self.cur_num_points
@@ -318,6 +351,8 @@ class GaussianImage_Covariance(nn.Module):
         self._xyz = optimizable_tensors["xyz"]
         self._features_dc = optimizable_tensors["f_dc"]
         self._cov2d = optimizable_tensors["cov2d"]
+        self.gabor_freqs = optimizable_tensors["gabor_freqs"]
+        self.gabor_weights = optimizable_tensors["gabor_weights"]
         new_num_points = self._xyz.shape[0]
         self.cur_num_points = new_num_points
         self.add_stage += 1
@@ -336,18 +371,19 @@ class GaussianImage_Covariance(nn.Module):
     def _prune_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
+            group_mask = self._expand_gabor_mask(mask) if group["name"] in ("gabor_freqs", "gabor_weights") else mask
             stored_state = self.optimizer.state.get(group['params'][0], None)
             if stored_state is not None:
-                stored_state["exp_avg"] = stored_state["exp_avg"][mask]
-                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][mask]
+                stored_state["exp_avg"] = stored_state["exp_avg"][group_mask]
+                stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][group_mask]
 
                 del self.optimizer.state[group['params'][0]]
-                group["params"][0] = nn.Parameter((group["params"][0][mask].requires_grad_(True)))
+                group["params"][0] = nn.Parameter((group["params"][0][group_mask].requires_grad_(True)))
                 self.optimizer.state[group['params'][0]] = stored_state
 
                 optimizable_tensors[group["name"]] = group["params"][0]
             else:
-                group["params"][0] = nn.Parameter(group["params"][0][mask].requires_grad_(True))
+                group["params"][0] = nn.Parameter(group["params"][0][group_mask].requires_grad_(True))
                 optimizable_tensors[group["name"]] = group["params"][0]
         return optimizable_tensors
 
@@ -358,6 +394,8 @@ class GaussianImage_Covariance(nn.Module):
             optimizable_tensors = self._prune_optimizer(valid_points_mask)
             self._xyz = optimizable_tensors["xyz"]
             self._features_dc = optimizable_tensors["f_dc"]
+            self.gabor_freqs = optimizable_tensors["gabor_freqs"]
+            self.gabor_weights = optimizable_tensors["gabor_weights"]
             new_num_points = self._xyz.shape[0]
 
             self._opacity = nn.Parameter(torch.ones((new_num_points, 1), device=self.device), requires_grad=False)
@@ -399,9 +437,25 @@ class GaussianImage_Covariance(nn.Module):
                                                                                               radius_clip=self.radius_clip,
                                                                                               coords_norm=self.coords_norm
                                                                                               )
-        out_img = rasterize_gaussians_plus(self.xys, depths, self.radii, conics, num_tiles_hit,
-                                           colors, self.get_opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W,
-                                           background=self.background)
+        out_img = rasterize_gabor_sum(
+            self.xys,
+            depths,
+            self.radii,
+            conics,
+            num_tiles_hit,
+            colors,
+            self.get_opacity,
+            self.get_gabor_freqs[:, 0],
+            self.get_gabor_freqs[:, 1],
+            self.get_gabor_weights,
+            self.num_gabor,
+            self.H,
+            self.W,
+            self.BLOCK_H,
+            self.BLOCK_W,
+            background=self.background,
+            radius_clip=self.radius_clip,
+        )
         out_img = torch.clamp(out_img, 0, 1)
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
         vq_loss = (l_vqm + l_vqs + l_vqc)
@@ -430,6 +484,9 @@ class GaussianImage_Covariance(nn.Module):
             colors = colors[valid_points_mask]
             new_num_points = valid_points_mask.sum().item()
             self._opacity = nn.Parameter(torch.ones((new_num_points, 1), device=self.device))
+            gabor_valid_mask = self._expand_gabor_mask(valid_points_mask)
+            self.gabor_freqs = nn.Parameter(self.gabor_freqs[gabor_valid_mask].detach())
+            self.gabor_weights = nn.Parameter(self.gabor_weights[gabor_valid_mask].detach())
             if self.SLV:
                 self.cholesky_bound = self.cholesky_bound[valid_points_mask]
             torch.cuda.empty_cache()
@@ -456,11 +513,24 @@ class GaussianImage_Covariance(nn.Module):
                                                                                               coords_norm=self.coords_norm
                                                                                               )
 
-        #
-        out_img = rasterize_gaussians_plus(self.xys, depths, self.radii, conics, num_tiles_hit, colors,
-                                           self.get_opacity, self.H, self.W,
-                                           self.BLOCK_H, self.BLOCK_W,
-                                           radius_clip=self.radius_clip)
+        out_img = rasterize_gabor_sum(
+            self.xys,
+            depths,
+            self.radii,
+            conics,
+            num_tiles_hit,
+            colors,
+            self.get_opacity,
+            self.get_gabor_freqs[:, 0],
+            self.get_gabor_freqs[:, 1],
+            self.get_gabor_weights,
+            self.num_gabor,
+            self.H,
+            self.W,
+            self.BLOCK_H,
+            self.BLOCK_W,
+            radius_clip=self.radius_clip,
+        )
 
         out_img = torch.clamp(out_img, 0, 1)
         out_img = out_img.view(-1, self.H, self.W, 3).permute(0, 3, 1, 2).contiguous()
