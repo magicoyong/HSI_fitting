@@ -21,68 +21,212 @@ import copy
 import json
 from models.utils import loss_fn
 from models.gaussianimage_covariance import GaussianImage_Covariance
+from endmember import masked_nmf_initialization, nmf_initialization
 
+
+BUILTIN_HSI_DATASETS = {
+    "urban": "Urban",
+    "salinas": "Salinas",
+    "jasperridge": "JasperRidge",
+    "paviau": "PaviaU",
+}
+
+MULTISPECTRAL_SCENES = {
+    "beads_ms",
+    "chart_and_stuffed_toy_ms",
+    "feathers_ms",
+    "flowers_ms",
+}
+
+MS_BAND_PATTERN = re.compile(r".+_ms_(\d+)\.png$", re.IGNORECASE)
+
+
+def _normalize_band_to_unit_interval(band):
+    band = band.astype(np.float32)
+    band_min = float(band.min())
+    band_max = float(band.max())
+    if band_max > band_min:
+        return (band - band_min) / (band_max - band_min)
+    return np.zeros_like(band, dtype=np.float32)
+
+
+def _load_builtin_hsi_dataset(name):
+    """Load built-in HSI dataset. Returns (H, W, C) float array."""
+    name = name.lower()
+    if name == "urban":
+        I = scipy.io.loadmat("HSI/data/Urban_R162.mat")['Y'].astype(float)
+        for i in range(162):
+            I[i, :] /= np.max(I[i, :])
+        I = I.reshape(162, 307, 307).transpose(2, 1, 0)  # (H, W, C)
+    elif name == "salinas":
+        I = scipy.io.loadmat("HSI/data/Salinas_crop.mat")['I'].astype(float)
+        I = np.clip(I, 0, None)
+        for i in range(I.shape[2]):
+            I[:, :, i] /= np.max(I[:, :, i])
+    elif name == "jasperridge":
+        I = scipy.io.loadmat("HSI/data/jasperRidge2_R198.mat")['Y'].astype(float)
+        for i in range(198):
+            I[i, :] /= np.max(I[i, :])
+        I = I.reshape(198, 100, 100).transpose(2, 1, 0)  # (H, W, C)
+    elif name == "paviau":
+        I = scipy.io.loadmat("HSI/data/PaviaU.mat")['paviaU'].astype(float)
+        for i in range(103):
+            I[:, :, i] /= np.max(I[:, :, i])
+        # I = I[-340:, :, :]
+    else:
+        raise ValueError(f"Unknown HSI dataset: {name}")
+    return I.astype(np.float32)
+
+
+def _load_multispectral_scene_dir(scene_dir):
+    """Load a directory of *_ms_XX.png bands into an (H, W, C) float32 cube."""
+    scene_dir = Path(scene_dir)
+    band_files = []
+    for path in scene_dir.iterdir():
+        match = MS_BAND_PATTERN.fullmatch(path.name)
+        if match is not None:
+            band_files.append((int(match.group(1)), path))
+
+    if not band_files:
+        raise ValueError(f"No multispectral band files found in: {scene_dir}")
+
+    band_files.sort(key=lambda item: item[0])
+
+    bands = []
+    expected_size = None
+    for _, band_path in band_files:
+        band = np.asarray(Image.open(band_path))
+        if band.ndim != 2:
+            raise ValueError(
+                f"Expected single-channel band image, got shape {band.shape} for {band_path}"
+            )
+        if expected_size is None:
+            expected_size = band.shape
+        elif band.shape != expected_size:
+            raise ValueError(
+                f"Band size mismatch in {scene_dir}: expected {expected_size}, got {band.shape} for {band_path.name}"
+            )
+        bands.append(_normalize_band_to_unit_interval(band))
+
+    return np.stack(bands, axis=-1).astype(np.float32)
+
+
+def resolve_hsi_dataset(dataset):
+    """Resolve --dataset to either a built-in HSI name or a multispectral scene directory."""
+    dataset_str = str(dataset).strip()
+    dataset_path = Path(dataset_str).expanduser()
+    dataset_key = dataset_str.lower()
+
+    if dataset_path.is_dir():
+        return {
+            "kind": "multispectral_dir",
+            "path": dataset_path,
+            "label": dataset_path.name,
+            "display": dataset_str,
+        }
+
+    if dataset_key in BUILTIN_HSI_DATASETS:
+        return {
+            "kind": "builtin_hsi",
+            "name": dataset_key,
+            "label": BUILTIN_HSI_DATASETS[dataset_key],
+            "display": BUILTIN_HSI_DATASETS[dataset_key],
+        }
+
+    if dataset_key in MULTISPECTRAL_SCENES:
+        scene_dir = Path("HSI") / dataset_key
+        if not scene_dir.is_dir():
+            raise FileNotFoundError(f"Multispectral scene directory not found: {scene_dir}")
+        return {
+            "kind": "multispectral_dir",
+            "path": scene_dir,
+            "label": scene_dir.name,
+            "display": dataset_key,
+        }
+
+    supported = list(BUILTIN_HSI_DATASETS.values()) + sorted(MULTISPECTRAL_SCENES)
+    raise ValueError(
+        "Unknown dataset. Supported built-ins/scenes: "
+        + ", ".join(supported)
+        + "; or pass a directory path."
+    )
+
+
+def load_hsi_dataset(name):
+    """Load and normalize HSI dataset. Returns (H, W, C) numpy array."""
+    resolved = resolve_hsi_dataset(name)
+    if resolved["kind"] == "builtin_hsi":
+        return _load_builtin_hsi_dataset(resolved["name"])
+    return _load_multispectral_scene_dir(resolved["path"])
+
+def compute_sam(gt, pred):
+    """Compute Spectral Angle Mapper (mean SAM in degrees)."""
+    # gt, pred: (H, W, C) numpy arrays
+    dot = np.sum(gt * pred, axis=-1)
+    norm_gt = np.linalg.norm(gt, axis=-1)
+    norm_pred = np.linalg.norm(pred, axis=-1)
+    cos_angle = dot / (norm_gt * norm_pred + 1e-8)
+    cos_angle = np.clip(cos_angle, -1, 1)
+    angles = np.arccos(cos_angle) * 180 / np.pi
+    return np.mean(angles)
 
 
 class SimpleTrainer2d:
     """Trains random 2d gaussians to fit an image."""
 
-    def __init__(
-            self,
-            image_path: Path,
-            log_dir: str,
-            num_points: int = 2000,
-            iterations: int = 30000,
-            model_path=None,
-            args=None,
-    ):
+    def __init__(self, args):
         self.device = torch.device("cuda:0")
-        gt_image = image_path_to_tensor(image_path)
-
-        self.gt_image = gt_image.to(self.device)
-
         self.args = args
-        self.num_points = num_points
+        self.dataset_info = resolve_hsi_dataset(args.dataset)
+        self.dataset_label = self.dataset_info["label"]
+
+        # ── Load HSI data ───────────────────────────────────────────────
+        I_np = load_hsi_dataset(args.dataset)  # (H, W, C)
+        self.H, self.W, self.C = I_np.shape
+        self.gt_image = torch.tensor(I_np, dtype=torch.float32).permute(2, 0, 1).unsqueeze(0)
+        self.gt_image = torch.clamp(self.gt_image, 0, 1).to(self.device)
+
+        E0, A0 = nmf_initialization(self.gt_image, args.rank )
+        self.rank = E0.shape[0]
+        assert E0.shape[1] == self.C
+
+        # ── Output directory ────────────────────────────────────────────
+        calib_tag = (
+            f"calib{args.calib_rank}_g{args.gamma}"
+            if not args.freeze_endmember_calibration
+            else "E0only"
+        )
+        self.log_dir = Path(
+            f"./checkpoints_hsi/{self.dataset_label}/"
+            f"GaborHSI_{args.iterations}_{args.num_points}_{args.num_gabor}"
+            f"_rank{args.rank}_{calib_tag}"
+        )
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.logwriter = LogWriter(self.log_dir)
+
         self.max_num_points = args.max_num_points
-        self.num_gabor = args.num_gabor
-        image_path = Path(image_path)
-        self.image_name = image_path.stem
         BLOCK_H, BLOCK_W = 16, 16
-        self.H, self.W = self.gt_image.shape[2], self.gt_image.shape[3]
-        self.iterations = iterations
-        self.save_imgs = True # args.save_imgs
-        self.loss_type = args.loss_type
+        from gaborimage_cholesky_hsi import GaborImage_Cholesky_HSI
+        self.model = GaborImage_Cholesky_HSI(
+            loss_type=args.loss_type,
+            opt_type=getattr(args, 'opt_type', 'adan'),
+            num_points=args.num_points,
+            H=self.H, W=self.W,
+            rank=self.rank, C=self.C,
+            E=E0,
+            calib_rank=args.calib_rank,
+            gamma=args.gamma,
+            freeze_endmember_calibration=args.freeze_endmember_calibration,
+            BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
+            device=self.device,
+            lr=args.lr,
+            num_gabor=args.num_gabor,
+            quantize=args.quantize,
+        ).to(self.device)
 
         self.add_stage = 0
-        self.log_dir = Path(os.path.join(log_dir, self.image_name))
         self.print = args.print
-        self.resume = False
-        self.logwriter = LogWriter(self.log_dir)
-        checkpoint = {}
-        if model_path is not None and os.path.exists(model_path):
-            print(f"loading model path:{model_path}")
-            self.logwriter.write(f"loading model path:{model_path}")
-            checkpoint = torch.load(model_path, map_location=self.device)
-            self.num_points = checkpoint['num_gs']
-            self.gaussian_model = GaussianImage_Covariance(loss_type=self.loss_type, opt_type=args.opt_type,
-                                                       num_points=self.num_points, H=self.H, W=self.W,
-                                                       BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
-                                                       device=self.device, lr=args.lr, quantize=args.quantize,
-                                                       args=args, logwriter=self.logwriter, num_gabor=self.num_gabor).to(self.device)
-            model_dict = self.gaussian_model.state_dict()
-            pretrained_dict = {k: v for k, v in checkpoint['gs'].items() if k in model_dict}
-            self.gaussian_model.cholesky_bound = checkpoint['slv_bound']
-            model_dict.update(pretrained_dict)
-            self.gaussian_model.load_state_dict(model_dict)
-            # self.gaussian_model.training_setup(args.lr,update_optimizer=True)
-            self.resume = True
-        else:
-            self.gaussian_model = GaussianImage_Covariance(loss_type=self.loss_type, opt_type=args.opt_type,
-                                                           num_points=self.num_points, H=self.H, W=self.W,
-                                                           BLOCK_H=BLOCK_H, BLOCK_W=BLOCK_W,
-                                                           device=self.device, lr=args.lr, quantize=args.quantize,
-                                                           args=args, logwriter=self.logwriter, num_gabor=self.num_gabor).to(self.device)
-
+        
     def add_sample_positions(self, render_image, iter=0):
 
         errors = torch.abs(render_image - self.gt_image).sum(dim=1)
@@ -256,94 +400,42 @@ def parse_args(argv):
     return args
 
 
-def main(argv):
+def main(argv=None):
     args = parse_args(argv)
-    if args.model_name != "GaussianImage_Covariance":
-        args.lr = 0.001
-        args.opt_type = "adan"
-        args.adaptive_add = False
-        args.prune = False
-        args.opacity = False
-        args.opt_nums = 2
 
-    args_text = yaml.safe_dump(args.__dict__, default_flow_style=False)
-
+    # Reproducibility
     torch.manual_seed(args.seed)
     random.seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
     np.random.seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed(args.seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
-    log_dir = (
-            f"./checkpoints/{args.data_name}/{args.model_name}_I{args.iterations}_N{args.num_points}{'_SLV' if args.SLV_init else ''}_R{args.radius_clip}{'_add' if args.adaptive_add else ''}" +
-            f"{'_prune' if args.prune else ''}{'_colornorm' if args.color_norm else ''}"
-    )
-    logwriter = LogWriter(Path(log_dir))
+    # Save config
+    args_text = yaml.safe_dump(vars(args), default_flow_style=False)
+    print(f"\n=== HSI Inpainting Configuration ===")
+    print(args_text)
 
-    script_name = os.path.basename(__file__)
-    logwriter.write(script_name)
-    logwriter.write(args_text)
+    trainer = SimpleTrainer2d(args)
 
-    psnrs, ms_ssims, training_times, eval_times, eval_fpses, gs_nums, params = [], [], [], [], [], [], []
+    # Save config to log dir
+    config_path = trainer.log_dir / "config.yaml"
+    with open(config_path, "w") as f:
+        f.write(args_text)
 
-    image_h, image_w = 0, 0
-    image_length, start = 24, 0
-    if args.data_name == "DIV2K_valid_HR":
-        image_length, start = 100, 800
+    psnr, sam, ssim, training_time = trainer.train()
 
-    model_path = (
-            f"./checkpoints/{args.data_name}/{args.model_name}_I{args.iterations}_N{args.num_points}{'_SLV' if args.SLV_init else ''}_R{args.radius_clip}{'_add' if args.adaptive_add else ''}" +
-            f"{'_prune' if args.prune else ''}{'_colornorm' if args.color_norm else ''}"
-    )
-    for i in range(start, start + image_length):
-        image_path = Path(args.dataset) / f'kodim{i + 1:02}.png'
-        model_path = Path(model_path) / f'kodim{i + 1:02}' / 'gaussian_model.pth.tar'
-
-        if args.data_name == "DIV2K_valid_HR":
-            image_path = Path(args.dataset) / f'{i + 1:04}.png'
-            model_path = Path(args.model_path) / f'{i + 1:04}' / 'gaussian_model.pth.tar'
-
-        trainer = SimpleTrainer2d(image_path=image_path, num_points=args.num_points,
-                                  iterations=args.iterations,  args=args,
-                                  model_path=model_path, log_dir=log_dir)
-
-        #  ===========overfiting training=================
-
-        psnr, ms_ssim_v, training_time, eval_time, eval_fps = trainer.train()
-        psnrs.append(psnr)
-        ms_ssims.append(ms_ssim_v)
-        training_times.append(training_time)
-        eval_times.append(eval_time)
-        eval_fpses.append(eval_fps)
-        image_h += trainer.H
-        image_w += trainer.W
-        image_name = image_path.stem
-        finally_gs_nums = trainer.gaussian_model.cur_num_points
-        finally_params = sum([p.numel() for p in trainer.gaussian_model.parameters() if p.requires_grad])
-        gs_nums.append(finally_gs_nums)
-        params.append(finally_params / 1e6)
-        logwriter.write(
-            "{}\t{}x{}\tPSNR\t{:.4f}\tMS-SSIM\t{:.4f}\tTraining\t{:.4f}\tEval\t{:.8f}\tFPS\t{:.4f}\tgs_nums\t{:.2e}\tParams(M)\t{:.2f}".format(
-                image_name, trainer.H, trainer.W, psnr, ms_ssim_v, training_time,
-                eval_time, eval_fps, finally_gs_nums, finally_params / 1e6))
-
-    # representation recording===========
-    avg_psnr = torch.tensor(psnrs).mean().item()
-    avg_ms_ssim = torch.tensor(ms_ssims).mean().item()
-    avg_training_time = torch.tensor(training_times).mean().item()
-    avg_eval_time = torch.tensor(eval_times).mean().item()
-    avg_eval_fps = torch.tensor(eval_fpses).mean().item()
-    avg_h = image_h // image_length
-    avg_w = image_w // image_length
-    avg_gs_nums = sum(gs_nums) / image_length
-    avg_params = sum(params) / image_length
-
-    logwriter.write(
-        "Average: {}x{}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}, gs_nums:{:.2e}, Params(M):{:.2f}".format(
-            avg_h, avg_w, avg_psnr, avg_ms_ssim, avg_training_time, avg_eval_time, avg_eval_fps, avg_gs_nums,
-            avg_params))
-
+    print(f"\n=== HSI Inpainting Result ===")
+    print(f"Dataset: {args.dataset}, Rank: {args.rank}")
+    print(f"Mask: {args.mask_type}, ratio={args.mask_ratio}")
+    print(f"Calibration: freeze={args.freeze_endmember_calibration}, "
+          f"calib_rank={args.calib_rank}, gamma={args.gamma}")
+    print(f"PSNR(masked vs gt):    {trainer.psnr_masked:.4f}  (degradation baseline)")
+    print(f"Best PSNR(recon vs gt): {psnr:.4f}")
+    print(f"Best SAM:               {sam:.4f}")
+    print(f"Best SSIM:              {ssim:.4f}")
+    print(f"Training Time:          {training_time:.2f}s")
 
 if __name__ == "__main__":
     main(sys.argv[1:])

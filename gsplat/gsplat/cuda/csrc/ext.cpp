@@ -26,6 +26,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // gabor
     m.def("rasterize_forward_sum_gabor", &rasterize_forward_sum_gabor_tensor);
     m.def("rasterize_backward_sum_gabor", &rasterize_backward_sum_gabor_tensor);
+    m.def("rasterize_forward_sum_gabor4", &rasterize_forward_sum_gabor4_tensor);
+    m.def("rasterize_backward_sum_gabor4", &rasterize_backward_sum_gabor4_tensor);
 
     m.def("project_gaussians_forward", &project_gaussians_forward_tensor);
     m.def("project_gaussians_backward", &project_gaussians_backward_tensor);

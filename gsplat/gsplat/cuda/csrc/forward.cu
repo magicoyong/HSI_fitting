@@ -840,6 +840,119 @@ __global__ void rasterize_forward_sum_gabor(
     }
 }
 
+__global__ void rasterize_forward_sum_gabor4(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float4* __restrict__ colors,
+    const float* __restrict__ opacities,
+    const float* __restrict__ gabor_freqs_x,
+    const float* __restrict__ gabor_freqs_y,
+    const float* __restrict__ gabor_weights,
+    const int num_freqs,
+    float* __restrict__ final_Ts,
+    int* __restrict__ final_index,
+    float4* __restrict__ out_img,
+    const float4& __restrict__ background
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id = block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i = block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j = block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    float px = (float)j;
+    float py = (float)i;
+    int32_t pix_id = i * img_size.x + j;
+
+    bool inside = (i < img_size.y && j < img_size.x);
+    bool done = !inside;
+
+    int2 range = tile_bins[tile_id];
+    int num_batches = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    __shared__ int32_t id_batch[BLOCK_SIZE];
+    __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
+    __shared__ float3 conic_batch[BLOCK_SIZE];
+    __shared__ float4 color_batch[BLOCK_SIZE];
+
+    float T = 1.f;
+    int cur_idx = 0;
+    int tr = block.thread_rank();
+    float4 pix_out = {0.f, 0.f, 0.f, 0.f};
+    for (int b = 0; b < num_batches; ++b) {
+        if (__syncthreads_count(done) >= BLOCK_SIZE) {
+            break;
+        }
+
+        int batch_start = range.x + BLOCK_SIZE * b;
+        int idx = batch_start + tr;
+        if (idx < range.y) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            const float2 xy = xys[g_id];
+            const float opac = opacities[g_id];
+            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            conic_batch[tr] = conics[g_id];
+            color_batch[tr] = colors[g_id];
+        }
+
+        block.sync();
+
+        int batch_size = min(BLOCK_SIZE, range.y - batch_start);
+        for (int t = 0; (t < batch_size) && !done; ++t) {
+            const float3 conic = conic_batch[t];
+            const float3 xy_opac = xy_opacity_batch[t];
+            const float opac = xy_opac.z;
+            const float2 delta = {xy_opac.x - px, xy_opac.y - py};
+            const float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                        conic.z * delta.y * delta.y) +
+                                conic.y * delta.x * delta.y;
+            const float gs_value = __expf(-sigma);
+
+            float weights_sum = 0.f;
+            float cos_sum = 0.f;
+            for (int f = 0; f < num_freqs; ++f) {
+                int32_t g = id_batch[t];
+                int g_idx = g * num_freqs + f;
+                float fx = gabor_freqs_x[g_idx];
+                float fy = gabor_freqs_y[g_idx];
+                float w = gabor_weights[g_idx];
+                weights_sum += w;
+                float theta = delta.x * fx + delta.y * fy;
+                cos_sum += w * __cosf(theta);
+            }
+
+            float H = (1.0f - weights_sum) + cos_sum;
+            const float alpha = min(1.f, opac * gs_value * H);
+            if (sigma < 0.f || alpha < H / 255.f) {
+                continue;
+            }
+
+            const float4 c = color_batch[t];
+            pix_out.x += c.x * alpha;
+            pix_out.y += c.y * alpha;
+            pix_out.z += c.z * alpha;
+            pix_out.w += c.w * alpha;
+            cur_idx = batch_start + t;
+        }
+        done = true;
+    }
+
+    if (inside) {
+        final_Ts[pix_id] = T;
+        final_index[pix_id] = cur_idx;
+        float4 final_color;
+        final_color.x = pix_out.x;
+        final_color.y = pix_out.y;
+        final_color.z = pix_out.z;
+        final_color.w = pix_out.w;
+        out_img[pix_id] = final_color;
+    }
+}
+
 
 __global__ void nd_rasterize_forward_gs_sum(
     const dim3 tile_bounds,

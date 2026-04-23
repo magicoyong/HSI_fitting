@@ -9,3 +9,5 @@ vector-quantize-pytorch
 wandb
 matplotlib
 opencv-python
+scikit-learn
+scipy

@@ -126,6 +126,13 @@ inline __device__ void warpSum3(float3& val, cg::thread_block_tile<32>& tile){
     val.z = cg::reduce(tile, val.z, cg::plus<float>());
 }
 
+inline __device__ void warpSum4(float4& val, cg::thread_block_tile<32>& tile){
+    val.x = cg::reduce(tile, val.x, cg::plus<float>());
+    val.y = cg::reduce(tile, val.y, cg::plus<float>());
+    val.z = cg::reduce(tile, val.z, cg::plus<float>());
+    val.w = cg::reduce(tile, val.w, cg::plus<float>());
+}
+
 inline __device__ void warpSum2(float2& val, cg::thread_block_tile<32>& tile){
     val.x = cg::reduce(tile, val.x, cg::plus<float>());
     val.y = cg::reduce(tile, val.y, cg::plus<float>());
@@ -1591,6 +1598,205 @@ __global__ void rasterize_backward_sum_gabor_kernel(
                 float* v_xy_ptr = (float*)(v_xy);
                 atomicAdd(v_xy_ptr + 2*g + 0, v_xy_local.x);
                 atomicAdd(v_xy_ptr + 2*g + 1, v_xy_local.y);
+                atomicAdd(v_opacity + g, v_opacity_local);
+            }
+        }
+    }
+}
+
+__global__ void rasterize_backward_sum_gabor4_kernel(
+    const dim3 tile_bounds,
+    const dim3 img_size,
+    const int32_t* __restrict__ gaussian_ids_sorted,
+    const int2* __restrict__ tile_bins,
+    const float2* __restrict__ xys,
+    const float3* __restrict__ conics,
+    const float4* __restrict__ rgbs,
+    const float* __restrict__ opacities,
+    const float4& __restrict__ background,
+    const float* __restrict__ gabor_freqs_x,
+    const float* __restrict__ gabor_freqs_y,
+    const float* __restrict__ gabor_weights,
+    const float* __restrict__ final_Ts,
+    const int* __restrict__ final_index,
+    const float4* __restrict__ v_output,
+    const float* __restrict__ v_output_alpha,
+    int num_freqs,
+    float2* __restrict__ v_xy,
+    float3* __restrict__ v_conic,
+    float4* __restrict__ v_rgb,
+    float* __restrict__ v_opacity,
+    float* __restrict__ v_weights,
+    float* __restrict__ v_freqs_x,
+    float* __restrict__ v_freqs_y
+) {
+    auto block = cg::this_thread_block();
+    int32_t tile_id = block.group_index().y * tile_bounds.x + block.group_index().x;
+    unsigned i = block.group_index().y * block.group_dim().y + block.thread_index().y;
+    unsigned j = block.group_index().x * block.group_dim().x + block.thread_index().x;
+
+    const float px = (float)j;
+    const float py = (float)i;
+    const int32_t pix_id = min(i * img_size.x + j, img_size.x * img_size.y - 1);
+    const bool inside = (i < img_size.y && j < img_size.x);
+    const int bin_final = inside ? final_index[pix_id] : 0;
+    const int2 range = tile_bins[tile_id];
+    const int num_batches = (range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE;
+
+    __shared__ int32_t id_batch[BLOCK_SIZE];
+    __shared__ float3 xy_opacity_batch[BLOCK_SIZE];
+    __shared__ float3 conic_batch[BLOCK_SIZE];
+    __shared__ float4 rgb_batch[BLOCK_SIZE];
+
+    const float4 v_out = v_output[pix_id];
+    const int tr = block.thread_rank();
+    cg::thread_block_tile<32> warp = cg::tiled_partition<32>(block);
+    const int warp_bin_final = cg::reduce(warp, bin_final, cg::greater<int>());
+
+    for (int b = 0; b < num_batches; ++b) {
+        block.sync();
+
+        const int batch_end = range.y - 1 - BLOCK_SIZE * b;
+        int batch_size = min(BLOCK_SIZE, batch_end + 1 - range.x);
+        const int idx = batch_end - tr;
+        if (idx >= range.x) {
+            int32_t g_id = gaussian_ids_sorted[idx];
+            id_batch[tr] = g_id;
+            const float2 xy = xys[g_id];
+            const float opac = opacities[g_id];
+            xy_opacity_batch[tr] = {xy.x, xy.y, opac};
+            conic_batch[tr] = conics[g_id];
+            rgb_batch[tr] = rgbs[g_id];
+        }
+
+        block.sync();
+
+        for (int t = max(0, batch_end - warp_bin_final); t < batch_size; ++t) {
+            int valid = inside;
+            if (batch_end - t > bin_final) {
+                valid = 0;
+            }
+
+            float opac;
+            float2 delta;
+            float3 conic;
+            float gs_value;
+            float weights_sum = 0.f;
+            float cos_sum = 0.f;
+            float sin_sum_x = 0.f;
+            float sin_sum_y = 0.f;
+            float H = 0.f;
+            float alpha = 0.f;
+
+            if (valid) {
+                conic = conic_batch[t];
+                float3 xy_opac = xy_opacity_batch[t];
+                opac = xy_opac.z;
+                delta = {xy_opac.x - px, xy_opac.y - py};
+                float sigma = 0.5f * (conic.x * delta.x * delta.x +
+                                      conic.z * delta.y * delta.y) +
+                              conic.y * delta.x * delta.y;
+                gs_value = __expf(-sigma);
+
+                for (int f = 0; f < num_freqs; ++f) {
+                    int32_t g = id_batch[t];
+                    int g_idx = g * num_freqs + f;
+                    float fx = gabor_freqs_x[g_idx];
+                    float fy = gabor_freqs_y[g_idx];
+                    float w = gabor_weights[g_idx];
+                    weights_sum += w;
+                    float theta = delta.x * fx + delta.y * fy;
+                    cos_sum += w * __cosf(theta);
+                    sin_sum_x -= w * fx * __sinf(theta);
+                    sin_sum_y -= w * fy * __sinf(theta);
+                }
+
+                H = (1.0f - weights_sum) + cos_sum;
+                alpha = min(1.f, opac * gs_value * H);
+                if (sigma < 0.f || alpha < H / 255.f) {
+                    valid = 0;
+                }
+            }
+
+            if (!warp.any(valid)) {
+                continue;
+            }
+
+            float4 v_rgb_local = {0.f, 0.f, 0.f, 0.f};
+            float3 v_conic_local = {0.f, 0.f, 0.f};
+            float2 v_xy_local = {0.f, 0.f};
+            float v_opacity_local = 0.f;
+            float v_alpha = 0.f;
+
+            if (valid) {
+                const float fac = alpha;
+                const float4 rgb = rgb_batch[t];
+                v_rgb_local = {fac * v_out.x, fac * v_out.y, fac * v_out.z, fac * v_out.w};
+
+                v_alpha += rgb.x * v_out.x;
+                v_alpha += rgb.y * v_out.y;
+                v_alpha += rgb.z * v_out.z;
+                v_alpha += rgb.w * v_out.w;
+
+                const float v_sigma = -v_alpha * gs_value * H * opac;
+                v_conic_local = {0.5f * v_sigma * delta.x * delta.x,
+                                 0.5f * v_sigma * delta.x * delta.y,
+                                 0.5f * v_sigma * delta.y * delta.y};
+                v_xy_local = {v_sigma * (conic.x * delta.x + conic.y * delta.y) + v_alpha * opac * gs_value * sin_sum_x,
+                              v_sigma * (conic.y * delta.x + conic.z * delta.y) + v_alpha * opac * gs_value * sin_sum_y};
+                v_opacity_local = v_alpha * gs_value * H;
+            }
+
+            for (int f = 0; f < num_freqs; ++f) {
+                float v_weight_local = 0.f;
+                float v_freq_x_local = 0.f;
+                float v_freq_y_local = 0.f;
+                int32_t g = id_batch[t];
+
+                if (valid) {
+                    int g_idx = g * num_freqs + f;
+                    float fx = gabor_freqs_x[g_idx];
+                    float fy = gabor_freqs_y[g_idx];
+                    float w = gabor_weights[g_idx];
+                    float theta = delta.x * fx + delta.y * fy;
+                    v_weight_local = v_alpha * opac * gs_value * (-1.0f + __cosf(theta));
+                    v_freq_x_local = -v_alpha * opac * gs_value * w * delta.x * __sinf(theta);
+                    v_freq_y_local = -v_alpha * opac * gs_value * w * delta.y * __sinf(theta);
+                }
+
+                warpSum(v_weight_local, warp);
+                warpSum(v_freq_x_local, warp);
+                warpSum(v_freq_y_local, warp);
+
+                if (warp.thread_rank() == 0) {
+                    int32_t g = id_batch[t];
+                    atomicAdd(v_weights + g * num_freqs + f, v_weight_local);
+                    atomicAdd(v_freqs_x + g * num_freqs + f, v_freq_x_local);
+                    atomicAdd(v_freqs_y + g * num_freqs + f, v_freq_y_local);
+                }
+            }
+
+            warpSum4(v_rgb_local, warp);
+            warpSum3(v_conic_local, warp);
+            warpSum2(v_xy_local, warp);
+            warpSum(v_opacity_local, warp);
+
+            if (warp.thread_rank() == 0) {
+                int32_t g = id_batch[t];
+                float* v_rgb_ptr = (float*)(v_rgb);
+                atomicAdd(v_rgb_ptr + 4 * g + 0, v_rgb_local.x);
+                atomicAdd(v_rgb_ptr + 4 * g + 1, v_rgb_local.y);
+                atomicAdd(v_rgb_ptr + 4 * g + 2, v_rgb_local.z);
+                atomicAdd(v_rgb_ptr + 4 * g + 3, v_rgb_local.w);
+
+                float* v_conic_ptr = (float*)(v_conic);
+                atomicAdd(v_conic_ptr + 3 * g + 0, v_conic_local.x);
+                atomicAdd(v_conic_ptr + 3 * g + 1, v_conic_local.y);
+                atomicAdd(v_conic_ptr + 3 * g + 2, v_conic_local.z);
+
+                float* v_xy_ptr = (float*)(v_xy);
+                atomicAdd(v_xy_ptr + 2 * g + 0, v_xy_local.x);
+                atomicAdd(v_xy_ptr + 2 * g + 1, v_xy_local.y);
                 atomicAdd(v_opacity + g, v_opacity_local);
             }
         }
