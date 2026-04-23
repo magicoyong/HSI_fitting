@@ -7,3 +7,5 @@ PyYAML
 tqdm
 vector-quantize-pytorch
 wandb
+matplotlib
+opencv-python

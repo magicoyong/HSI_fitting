@@ -337,7 +337,7 @@ class GaussianImage_Covariance(nn.Module):
     def densification_postfix(self, new_xyz, new_features_dc, new_cov2d, new_opacities=None, new_bkcolor=None):
         #  排除本身不正定的点
         none_definite, valid_mask = self.check_non_semi_definite(new_cov2d)
-           new_gabor_freqs, new_gabor_weights = self._init_gabor_params(int(valid_mask.sum().item()))
+        new_gabor_freqs, new_gabor_weights = self._init_gabor_params(int(valid_mask.sum().item()))
 
         d = {"xyz": new_xyz[valid_mask],
              "f_dc": new_features_dc[valid_mask],

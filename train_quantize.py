@@ -135,6 +135,8 @@ class SimpleTrainer2d:
                 self.gaussian_model._features_dc = nn.Parameter(best_model_dict['_features_dc'])
                 self.gaussian_model._cov2d = nn.Parameter(best_model_dict['_cov2d'])
                 self.gaussian_model._opacity = nn.Parameter(best_model_dict['_opacity'])
+                self.gaussian_model.gabor_freqs = nn.Parameter(best_model_dict['gabor_freqs'])
+                self.gaussian_model.gabor_weights = nn.Parameter(best_model_dict['gabor_weights'])
                 self.gaussian_model.load_state_dict(best_model_dict)
                 self.gaussian_model.cholesky_bound = slv_bound
                 self.gaussian_model.cur_num_points = best_model_dict['_xyz'].shape[0]
@@ -181,6 +183,8 @@ class SimpleTrainer2d:
         self.gaussian_model._features_dc = nn.Parameter(best_model_dict['_features_dc'])
         self.gaussian_model._cov2d = nn.Parameter(best_model_dict['_cov2d'])
         self.gaussian_model._opacity = nn.Parameter(best_model_dict['_opacity'])
+        self.gaussian_model.gabor_freqs = nn.Parameter(best_model_dict['gabor_freqs'])
+        self.gaussian_model.gabor_weights = nn.Parameter(best_model_dict['gabor_weights'])
         self.gaussian_model.load_state_dict(best_model_dict)
         self.gaussian_model.cholesky_bound = slv_bound
         self.gaussian_model.cur_num_points = best_model_dict['_xyz'].shape[0]
