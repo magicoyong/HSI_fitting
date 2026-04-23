@@ -109,21 +109,33 @@ class GaussianImage_Covariance_HSI(GaussianImage_Covariance):
         if num_channels == 0:
             return tuple()
 
-        candidates: List[Tuple[int, int, Tuple[Tuple[int, int], ...]]] = []
+        if num_channels < 3:
+            raise ValueError(
+                f"rank={num_channels} cannot be decomposed into exact 3/4-channel rendering groups"
+            )
+
+        candidates: List[Tuple[int, Tuple[Tuple[int, int], ...]]] = []
         if num_channels >= 3:
-            tail = GaussianImage_Covariance_HSI._plan_group_sizes(num_channels - 3)
-            candidates.append((0, 1 + len(tail), ((3, 3),) + tail))
-        else:
-            candidates.append((3 - num_channels, 1, ((num_channels, 3),)))
+            try:
+                tail = GaussianImage_Covariance_HSI._plan_group_sizes(num_channels - 3)
+                candidates.append((1 + len(tail), ((3, 3),) + tail))
+            except ValueError:
+                pass
 
         if num_channels >= 4:
-            tail = GaussianImage_Covariance_HSI._plan_group_sizes(num_channels - 4)
-            candidates.append((0, 1 + len(tail), ((4, 4),) + tail))
-        else:
-            candidates.append((4 - num_channels, 1, ((num_channels, 4),)))
+            try:
+                tail = GaussianImage_Covariance_HSI._plan_group_sizes(num_channels - 4)
+                candidates.append((1 + len(tail), ((4, 4),) + tail))
+            except ValueError:
+                pass
 
-        best = min(candidates, key=lambda item: (item[0], item[1]))
-        return best[2]
+        if not candidates:
+            raise ValueError(
+                f"rank={num_channels} cannot be decomposed into exact 3/4-channel rendering groups"
+            )
+
+        best = min(candidates, key=lambda item: item[0])
+        return best[1]
 
     def _build_channel_groups(self, num_channels: int) -> List[ChannelGroup]:
         groups = []
@@ -285,13 +297,6 @@ class GaussianImage_Covariance_HSI(GaussianImage_Covariance):
                 optimizable_tensors[group_name] = group["params"][0]
         return optimizable_tensors
 
-    def _pad_feature_group(self, features: torch.Tensor, kernel_channels: int) -> torch.Tensor:
-        if features.shape[1] == kernel_channels:
-            return features
-        padded = features.new_zeros(features.shape[0], kernel_channels)
-        padded[:, : features.shape[1]] = features
-        return padded.contiguous()
-
     def _render_abundance_groups(
         self,
         depths: torch.Tensor,
@@ -304,8 +309,7 @@ class GaussianImage_Covariance_HSI(GaussianImage_Covariance):
         rendered_groups = []
         features = self.get_features
         for start, end, kernel_channels in self.channel_groups:
-            feature_group = features[:, start:end]
-            padded_features = self._pad_feature_group(feature_group, kernel_channels)
+            feature_group = features[:, start:end].contiguous()
             background = self.abundance_background3 if kernel_channels == 3 else self.abundance_background4
             rendered = rasterize_gabor_sum(
                 self.xys,
@@ -313,7 +317,7 @@ class GaussianImage_Covariance_HSI(GaussianImage_Covariance):
                 self.radii,
                 conics,
                 num_tiles_hit,
-                padded_features,
+                feature_group,
                 self.get_opacity,
                 self.get_gabor_freqs[:, 0],
                 self.get_gabor_freqs[:, 1],
