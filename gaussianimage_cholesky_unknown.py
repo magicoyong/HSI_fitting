@@ -80,52 +80,40 @@ class GaussianImage_Cholesky_EA(nn.Module):
     def get_cholesky_elements(self):
         return self._cholesky+self.cholesky_bound
 
+    def _get_feature_chunk_sizes(self):
+        if self.rank < 3 or self.rank == 5:
+            raise ValueError(
+                f"rank={self.rank} is not supported by gsplat sum rasterization; use a rank decomposable into 3/4-channel chunks"
+            )
+
+        groups_of_four, remainder = divmod(self.rank, 4)
+        if remainder == 0:
+            return [4] * groups_of_four
+        if remainder == 3:
+            return [4] * groups_of_four + [3]
+        if remainder == 2 and groups_of_four >= 1:
+            return [4] * (groups_of_four - 1) + [3, 3]
+        if remainder == 1 and groups_of_four >= 2:
+            return [4] * (groups_of_four - 2) + [3, 3, 3]
+
+        raise ValueError(
+            f"rank={self.rank} is not supported by gsplat sum rasterization; use a rank decomposable into 3/4-channel chunks"
+        )
+ 
+    def _rasterize_feature_chunks(self, features, depths, conics, num_tiles_hit):
+        rendered_chunks = []
+        for feature_chunk in torch.split(features, self._get_feature_chunk_sizes(), dim=1):
+            rendered_chunks.append(
+                rasterize_gaussians_sum(
+                    self.xys, depths, self.radii, conics, num_tiles_hit,
+                    feature_chunk, self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
+                )
+            )
+        return torch.cat(rendered_chunks, dim=2)
+
     def forward(self):
         self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(self.get_xyz, self.get_cholesky_elements, self.H, self.W, self.tile_bounds)
-        features_split = torch.split(self.get_features, 4, dim=1)  
-
-        out_img1 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[0], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        out_img2 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[1], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        out_img3 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[2], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        '''
-        out_img4 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[3], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        out_img5 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[4], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        out_img6 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[5], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        out_img7 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[6], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-
-        out_img8 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[7], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        '''
-        #, out_img4, out_img5, out_img6, out_img7, out_img8
-        out_img = torch.cat((out_img1, out_img2, out_img3), dim = 2)
+        out_img = self._rasterize_feature_chunks(self.get_features, depths, conics, num_tiles_hit)
         out_img = torch.clamp(out_img, 0, 1) #(H, W, rank)
         out_img = out_img.view(self.H * self.W, self.rank).contiguous() #(H * W, rank)
         return {"render": out_img}
@@ -170,32 +158,8 @@ class GaussianImage_Cholesky_EA(nn.Module):
         
         self.xys, depths, self.radii, conics, num_tiles_hit = project_gaussians_2d(means, 
                 cholesky_elements, self.H, self.W, self.tile_bounds)
-        
-        features_split = torch.split(features, (4,3,3), dim=1)  
-        
-        out_img1 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[0], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )#
-        
-        out_img2 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[1], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        out_img3 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[2], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        '''
-        out_img4 = rasterize_gaussians_sum(
-            self.xys, depths, self.radii, conics, num_tiles_hit,
-            features_split[3], self._opacity, self.H, self.W, self.BLOCK_H, self.BLOCK_W, return_alpha=False
-        )
-        
-        '''
-        #, out_img4
-        out_img = torch.cat((out_img1, out_img2, out_img3), dim = 2)
+
+        out_img = self._rasterize_feature_chunks(features, depths, conics, num_tiles_hit)
         out_img = torch.clamp(out_img, 0, 1) #(H, W, rank)
         out_img = out_img.view(self.H * self.W, self.rank).contiguous() * torch.exp(self.coef)#(H * W, rank)
         

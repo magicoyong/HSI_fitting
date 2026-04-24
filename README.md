@@ -32,6 +32,12 @@ Run the following command to perform inline NMF initialization and LoR-SGS fitti
 python main.py --dataset paviau --num_points 14500 --iterations 7000
 ```
 
+You can also override the inline NMF rank explicitly:
+
+```shell
+python main.py --dataset jasperridge --rank 8 --num_points 600 --iterations 8000
+```
+
 ## Acknowledgments
 
 This implementation is developed based on the open-source project [GaussianImage](https://github.com/Xinjie-Q/GaussianImage), which provides the foundation for Gaussian splatting. We have modified and extended it for low-rank spectral modeling and hyperspectral image fitting. We thank the original authors for their excellent work and for sharing their code.

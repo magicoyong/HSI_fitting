@@ -58,14 +58,15 @@ def main():
     parser = argparse.ArgumentParser(description="LoR-SGS Hyperspectral Image Fitting")
     parser.add_argument('--dataset', type=str, default='JasperRidge',
                         help='Dataset name: Urban | Salinas | JasperRidge | PaviaU')
+    parser.add_argument('--rank', type=int, default=None,
+                        help='NMF rank; defaults to the dataset-specific preset when omitted')
     parser.add_argument('--iterations', type=int, default=8000,
                         help='Number of training iterations')
     parser.add_argument('--num_points', type=int, default=600,
                         help='Number of Gaussian points')
     args = parser.parse_args()
 
-    # 固定 rank（例如 Urban/Salinas/PaviaU 用 12, JasperRidge 用 10）
-    rank = get_dataset_rank(args.dataset)
+    rank = args.rank if args.rank is not None else get_dataset_rank(args.dataset)
 
     print(f"\n=== Training Configuration ===")
     print(f"Dataset: {args.dataset}")
