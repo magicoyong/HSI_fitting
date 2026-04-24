@@ -1,26 +1,18 @@
+import copy
 import math
 import time
 from pathlib import Path
-import argparse
-import yaml
+
 import numpy as np
 import torch
-import sys
-from PIL import Image
 import torch.nn.functional as F
 from pytorch_msssim import ms_ssim
-from utils import *
-import scipy.io
 from tqdm import tqdm
-import matplotlib.pyplot as plt
-from sklearn.decomposition import NMF
-import copy
-from quantize import *
-import matplotlib.pyplot as plt
-from thop import profile
+
+from utils import *
 
 class SimpleTrainerHSI:
-    """Trains random 2d gaussians to fit an image."""
+    """Fits random 2d gaussians to a hyperspectral image."""
     def __init__(
         self,
         ground_truth: torch.tensor,
@@ -30,7 +22,7 @@ class SimpleTrainerHSI:
         model_name: str = "GaussianImage_Cholesky_nd",
         iterations: int = 50000,
         model_path = None,
-        data_name = "HSI",
+        data_name = "fitting",
         image_name = None,
     ):
         self.device = torch.device("cuda:0")
@@ -78,10 +70,11 @@ class SimpleTrainerHSI:
         progress_bar = tqdm(range(1, self.iterations+1), desc="Training progress")
         self.gaussian_model.train()
         start_time = time.time()
-        best_psnr = 0
+        best_psnr = float("-inf")
+        best_model_dict = copy.deepcopy(self.gaussian_model.state_dict())
         
         for iter in range(1, self.iterations+1):
-            loss, psnr = self.gaussian_model.train_iter_quantize()
+            loss, psnr = self.gaussian_model.train_iter()
             psnr_list.append(psnr)
             iter_list.append(iter)
             if best_psnr < psnr:
@@ -94,28 +87,28 @@ class SimpleTrainerHSI:
         
         end_time = time.time() - start_time
         progress_bar.close()
-        psnr_value, ms_ssim_value, sam, bpppb = self.test()
+        psnr_value, ms_ssim_value, sam = self.test()
         torch.save(self.gaussian_model.state_dict(), self.log_dir / "gaussian_model.pth.tar")
         self.gaussian_model.load_state_dict(best_model_dict)
-        best_psnr_value, best_ms_ssim_value, best_sam, best_bpppb = self.test(True)
+        best_psnr_value, best_ms_ssim_value, best_sam = self.test(True)
         torch.save(best_model_dict, self.log_dir / "gaussian_model.best.pth.tar")
         with torch.no_grad():
             self.gaussian_model.eval()
             test_start_time = time.time()
             for i in range(100):
-                _ = self.gaussian_model.forward_quantize()
+                _ = self.gaussian_model.forward()
             test_end_time = (time.time() - test_start_time)/100
         
         self.logwriter.write("Training Complete in {:.4f}s, Eval time:{:.8f}s, FPS:{:.4f}".format(end_time, test_end_time, 1/test_end_time))
         torch.save(self.gaussian_model.state_dict(), self.log_dir / "gaussian_model.pth.tar")
-        return psnr_value, ms_ssim_value, end_time, test_end_time, 1/test_end_time, bpppb, best_psnr_value, best_ms_ssim_value, best_sam, best_bpppb
+        return psnr_value, ms_ssim_value, end_time, test_end_time, 1/test_end_time, sam, best_psnr_value, best_ms_ssim_value, best_sam
 
     def test(self, best = False):
         self.gaussian_model.eval()
         with torch.no_grad():
-            out = self.gaussian_model.forward_quantize()
+            out = self.gaussian_model.forward()
             A = out["render"].float()
-            E = FakeQuantizationHalf.apply(self.gaussian_model.endmember.to(torch.float32))
+            E = self.gaussian_model.endmember.to(torch.float32)
             I = A @ E
             I = I.view(-1, self.H, self.W, self.C).permute(0, 3, 1, 2).contiguous()
             '''
@@ -155,72 +148,26 @@ class SimpleTrainerHSI:
         
         ms_ssim_value = ms_ssim(I, self.gt_image.float(), data_range=1, size_average=True, win_size=7).item()#
         mean_sam = compute_sam(self.gt_image.squeeze(0).permute(1, 2, 0).cpu().numpy(), I.squeeze(0).permute(1, 2, 0).cpu().numpy())
-        
-        m_bit, s_bit, r_bit, c_bit = out["unit_bit"]
-        e_bit = self.rank * self.C * 16
-        bpppb = (m_bit + s_bit + r_bit + c_bit + e_bit) / self.H /self.W / self.C 
-        
+
         strings = "Best Test" if best else "Test"
-        self.logwriter.write("{} PSNR:{:.4f}, MS_SSIM:{:.6f}, bpppb:{:.4f}".format(strings, psnr, 
-                            ms_ssim_value, bpppb))
-        return psnr, ms_ssim_value, mean_sam, bpppb
+        self.logwriter.write("{} PSNR:{:.4f}, MS_SSIM:{:.6f}, SAM:{:.6f}".format(strings, psnr,
+                    ms_ssim_value, mean_sam))
+        return psnr, ms_ssim_value, mean_sam
     
-def train_nd(gt, endmember, image_name, iterations, num_points, model_name = "Gaussian_Cholesky_nd"):
-    logwriter = LogWriter(Path(f"./checkpoints/compression/{model_name}_{iterations}_{num_points}"))
-    trainer = SimpleTrainerHSI(ground_truth=gt, endmember = endmember, num_points=num_points, iterations=iterations, model_name=model_name, image_name = image_name)
-    psnr, ms_ssim, training_time, eval_time, eval_fps, bpppb, best_psnr_value, best_ms_ssim_value, best_sam, best_bpppb= trainer.train()
-    logwriter.write("{}: {}x{}x{}, Rank: {}, bpppb: {:.4f}, PSNR:{:.4f}, MS-SSIM:{:.4f}, Best bpppb: {:.4f}, Best PSNR:{:.4f}, Best MS-SSIM:{:.4f},Best SAM: {:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
-            image_name, trainer.H, trainer.W, trainer.C, trainer.rank, bpppb, psnr, ms_ssim, best_bpppb, best_psnr_value, best_ms_ssim_value, best_sam, training_time, eval_time, eval_fps))
+def train_nd(gt, endmember, image_name, iterations, num_points, model_name="GaussianImage_Cholesky_nd"):
+    logwriter = LogWriter(Path(f"./checkpoints/fitting/{model_name}_{iterations}_{num_points}"))
+    trainer = SimpleTrainerHSI(
+        ground_truth=gt,
+        endmember=endmember,
+        num_points=num_points,
+        iterations=iterations,
+        model_name=model_name,
+        image_name=image_name,
+    )
+    psnr, ms_ssim, training_time, eval_time, eval_fps, sam, best_psnr_value, best_ms_ssim_value, best_sam = trainer.train()
+    logwriter.write("{}: {}x{}x{}, Rank: {}, PSNR:{:.4f}, MS-SSIM:{:.4f}, SAM:{:.4f}, Best PSNR:{:.4f}, Best MS-SSIM:{:.4f}, Best SAM:{:.4f}, Training:{:.4f}s, Eval:{:.8f}s, FPS:{:.4f}".format(
+        image_name, trainer.H, trainer.W, trainer.C, trainer.rank, psnr, ms_ssim, sam, best_psnr_value, best_ms_ssim_value, best_sam, training_time, eval_time, eval_fps))
+    return psnr, ms_ssim, training_time, eval_time, eval_fps, sam, best_psnr_value, best_ms_ssim_value, best_sam
     
 if __name__ == "__main__":
-    ''' 
-    E = np.load('HSI/init/Urban_endmember_rank_12.npy').astype(np.float32)
-    I = scipy.io.loadmat("HSI/data/Urban_R162.mat")['Y'].astype(float)
-    for i in range(162): 
-        I[i,:] = I[i,:]/np.max(I[i,:])
-    I = I.reshape(162,307,307).transpose(2,1,0)
-    
-    E = np.load('HSI/init/Salinas_endmember_rank_12.npy').astype(np.float32)
-    I = scipy.io.loadmat("HSI/data/Salinas_crop.mat")['I'].astype(float)
-    I = np.clip(I, 0, None)
-    for i in range(204): 
-        I[:,:,i] = I[:,:,i]/ np.max(I[:,:,i])
-    '''  
-    E = np.load('HSI/init/JR_endmember_rank_10.npy').astype(np.float32)
-    I = scipy.io.loadmat("HSI/data/jasperRidge2_R198.mat")['Y'].astype(float)
-    for i in range(198): 
-        I[i,:] = I[i,:]/np.max(I[i,:])
-    I = I.reshape(198,100,100).transpose(2,1,0)
-    '''
-    E = np.load('HSI/init/PaviaU_endmember_rank_12.npy').astype(np.float32)
-    I = scipy.io.loadmat("HSI/data/PaviaU.mat")['paviaU'].astype(float)
-    for i in range(103): 
-        I[:,:,i] = I[:,:,i] / np.max(I[:,:,i])
-    I = I[-340:,:,:]
-    '''
-    GT = torch.tensor(I)
-    GT = GT.view(-1, GT.size(0), GT.size(1), GT.size(2)).permute(0, 3, 1, 2).contiguous()
-    GT = torch.clamp(GT,0,1)
-    ''' 
-    #for i in np.arange(44000,56001,4000):
-    for i in [12000]:#, 14500
-        train_nd(GT, endmember = E, iterations = 7000, num_points = i, 
-             model_name = "GaussianImage_Cholesky_nd", image_name = "Urban")
-    
-    #for i in np.arange(21600, 28002, 1600):
-    for i in [5000]:#, 5000
-        train_nd(GT, endmember = E, iterations = 7000, num_points = i, 
-             model_name = "GaussianImage_Cholesky_nd", image_name = "Salinas")
-    '''
-    
-    #for i in np.arange(5400, 7001, 400):
-    for i in [600]:#, 10002750
-        train_nd(GT, endmember = E, iterations = 8000, num_points = i, 
-             model_name = "GaussianImage_Cholesky_nd", image_name = "JasperRidge")
-    '''
-    
-    #for i in np.arange(4000,64001,4000):
-    for i in [10000]:#, 14500
-        train_nd(GT, endmember = E, iterations = 7000, num_points = i, 
-             model_name = "GaussianImage_Cholesky_nd", image_name = "PaviaU")
-    '''
+    raise SystemExit("Use main.py to run fitting with inline NMF initialization.")

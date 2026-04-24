@@ -148,7 +148,7 @@ class GaussianImage_Cholesky_EA(nn.Module):
             self.endmember *=  (A_new.T @ self.image.view(-1, self.C)) / (A_new.T @ image_new)
         '''
         with torch.no_grad():
-            I = (A @ self.endmember * self.coef_endmember).view(-1, self.H, self.W, self.C).permute(0, 3, 1, 2).contiguous()
+            I = (A @ self.endmember).view(-1, self.H, self.W, self.C).permute(0, 3, 1, 2).contiguous()
             mse_loss = F.mse_loss(I, self.image)
             psnr = 10 * math.log10(1.0 / mse_loss.item())
             

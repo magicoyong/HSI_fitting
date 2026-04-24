@@ -1,4 +1,4 @@
-# LoR-SGS: Hyperspectral Image Compression via Low-rank Spectral Gaussian Splatting
+# LoR-SGS: Hyperspectral Image Fitting via Low-rank Spectral Gaussian Splatting
 ### Requirements
 
 ```bash
@@ -14,29 +14,27 @@ Organize your files as follows:
 
 ```kotlin
 HSI/
- ├── data/
- │    └── PaviaU.mat
- └── init/
+ └── data/
+  └── PaviaU.mat
 ```
 
 The `.mat` file contains hyperspectral image data.
 
-The estimated coefficient basis matrix file will be automatically generated in `HSI/init/`.
+`main.py` now runs NMF inline at startup and passes the generated endmembers directly into the fitting loop.
 
-Configure hyperparameters in `train_compression.py` and `gaussianimage_cholesky_unknown.py`
+Configure hyperparameters in `main.py`, `train_compression.py`, and `gaussianimage_cholesky_unknown.py`
 
 ### Run demo
 
-Run the following commands sequentially to perform **NMF estimation** and **LoR-SGS training** on the *Pavia University* dataset:
+Run the following command to perform inline NMF initialization and LoR-SGS fitting on the *Pavia University* dataset:
 
 ```shell
-python endmember.py --dataset paviau --rank 12
 python main.py --dataset paviau --num_points 14500 --iterations 7000
 ```
 
 ## Acknowledgments
 
-This implementation is developed based on the open-source project [GaussianImage](https://github.com/Xinjie-Q/GaussianImage), which provides the foundation for Gaussian splatting. We have modified and extended it for low-rank spectral modeling and hyperspectral image compression. We thank the original authors for their excellent work and for sharing their code.
+This implementation is developed based on the open-source project [GaussianImage](https://github.com/Xinjie-Q/GaussianImage), which provides the foundation for Gaussian splatting. We have modified and extended it for low-rank spectral modeling and hyperspectral image fitting. We thank the original authors for their excellent work and for sharing their code.
 
 ## Citation
 

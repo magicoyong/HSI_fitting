@@ -4,5 +4,6 @@ pandas
 pillow
 pytorch-msssim
 PyYAML
+scikit-learn
 tqdm
 vector-quantize-pytorch
