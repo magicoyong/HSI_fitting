@@ -1,6 +1,6 @@
 """Python bindings for custom Cuda functions"""
 
-from typing import Optional, Type
+from typing import Optional, Tuple, Type
 
 import torch
 from jaxtyping import Float, Int
@@ -19,7 +19,12 @@ def _validate_gabor_inputs(
     gabor_freqs_y: Float[Tensor, "*batch num_freqs"],
     gabor_weights: Float[Tensor, "*batch num_freqs"],
     num_freqs: int,
-) -> tuple[Float[Tensor, "channels"], Float[Tensor, "num_points_num_freqs"], Float[Tensor, "num_points_num_freqs"], Float[Tensor, "num_points_num_freqs"]]:
+) -> Tuple[
+    Float[Tensor, "channels"],
+    Float[Tensor, "num_points_num_freqs"],
+    Float[Tensor, "num_points_num_freqs"],
+    Float[Tensor, "num_points_num_freqs"],
+]:
     if background is not None:
         assert (
             background.shape[0] == colors.shape[-1]

@@ -40,7 +40,7 @@ def load_dataset(name):
     """Load and normalize hyperspectral dataset.  Returns (C, H*W)."""
     name = name.lower()
     if name == "salinas":
-        data = scipy.io.loadmat("HSI/data/Salinas_crop.mat")['I'].astype(float)
+        data = scipy.io.loadmat("HSI/data/Salinas_crop.mat")['salinas'].astype(float)
         data = np.clip(data, 0, None)
         for i in range(204):
             data[:, :, i] /= np.max(data[:, :, i])
@@ -68,7 +68,7 @@ def nmf_initialization(I, rank):
     if hasattr(I, "detach"):
         I = I.detach().float().cpu()
         if I.dim() == 4 and I.shape[0] == 1:
-            I = I.squeeze(0)
+            I = I.squeeze(0).reshape(I.shape[1], -1)
         if I.dim() == 3:
             if I.shape[0] <= I.shape[-1] and I.shape[0] <= I.shape[1]:
                 I = I.reshape(I.shape[0], -1)
@@ -78,7 +78,7 @@ def nmf_initialization(I, rank):
     else:
         I = np.asarray(I)
         if I.ndim == 4 and I.shape[0] == 1:
-            I = I.squeeze(0)
+            I = I.squeeze(0).reshape(I.shape[1], -1)
         if I.ndim == 3:
             if I.shape[0] <= I.shape[-1] and I.shape[0] <= I.shape[1]:
                 I = I.reshape(I.shape[0], -1)

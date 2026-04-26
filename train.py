@@ -238,8 +238,8 @@ class SimpleTrainer2d:
         if iter == self.iterations - self.args.grow_iter:
             dynamic_num_samples = max(0, self.max_num_points - self.gaussian_model.cur_num_points)  # 最大采样点数量限制
         else:
-            dynamic_num_samples = max(0, min(base_num_samples,
-                                             self.max_num_points - self.gaussian_model.cur_num_points))
+            dynamic_num_samples = max(0, max(base_num_samples,
+                                             (self.max_num_points - self.gaussian_model.cur_num_points))/2)
         if dynamic_num_samples:
             P_flat = normalized_gradient.view(-1)
             _, sampled_indices_1d = torch.topk(P_flat, dynamic_num_samples)

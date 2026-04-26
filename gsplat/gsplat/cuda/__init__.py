@@ -63,3 +63,5 @@ rasterize_sum_plus_backward= _make_lazy_cuda_func("rasterize_sum_plus_backward")
 
 rasterize_forward_sum_gabor = _make_lazy_cuda_func("rasterize_forward_sum_gabor")
 rasterize_backward_sum_gabor = _make_lazy_cuda_func("rasterize_backward_sum_gabor")
+rasterize_forward_sum_gabor4 = _make_lazy_cuda_func("rasterize_forward_sum_gabor4")
+rasterize_backward_sum_gabor4 = _make_lazy_cuda_func("rasterize_backward_sum_gabor4")
